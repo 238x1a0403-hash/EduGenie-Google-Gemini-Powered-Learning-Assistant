@@ -1,0 +1,197 @@
+"""
+main.py
+-------
+EduGenie - Central FastAPI Backend Application
+
+Wires the AI-powered feature modules (qna, explanation_module, quiz_module,
+summary_module, learning_path) into RESTful API endpoints so the frontend
+(templates/index.html, static/style.css) can communicate with the
+AI-powered backend efficiently. FastAPI was chosen for its high
+performance, native async support, simple syntax, and built-in request
+validation / automatic OpenAPI docs.
+
+Endpoints implemented:
+    GET  /qa                      -> Question Answering
+    POST /explain                 -> Concept Explanation
+    POST /summarize               -> Summarization
+    POST /quiz                    -> Quiz Generation
+    GET  /learn/recommendations   -> Personalized Learning Recommendations
+
+Install:
+    pip install fastapi uvicorn[standard] jinja2 python-multipart \
+                google-generativeai transformers torch sentencepiece
+
+Run:
+    uvicorn main:app --reload
+    Then visit http://127.0.0.1:8000/docs for interactive API docs.
+"""
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# AI module imports (each module is self-contained — see its own file)
+# ---------------------------------------------------------------------------
+from qna import answer_question
+from explanation_module import explain_concept
+from quiz_module import generate_quiz
+from summary_module import summarize_text
+from learning_path import get_learning_recommendations
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="EduGenie API",
+    description="Google Gemini powered learning assistant — backend API",
+    version="1.0.0",
+)
+
+# Allow the frontend (potentially served from a different origin/port during
+# development) to call these APIs.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve frontend assets
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+
+@app.get("/", response_class=HTMLResponse, tags=["Frontend"])
+async def home(request: Request):
+    """Serve the main EduGenie web page."""
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+# ---------------------------------------------------------------------------
+# Request body schemas
+# ---------------------------------------------------------------------------
+class ExplainRequest(BaseModel):
+    topic: str = Field(..., min_length=1, description="Concept/topic to explain")
+
+
+class SummarizeRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Passage to summarize")
+
+
+class QuizRequest(BaseModel):
+    passage: str = Field(..., min_length=1, description="Passage to generate the quiz from")
+    num_questions: int = Field(3, ge=1, le=10, description="Number of MCQs to generate")
+    num_options: int = Field(4, ge=2, le=6, description="Number of options per question")
+
+
+# ---------------------------------------------------------------------------
+# /qa — Question Answering (GET)
+# ---------------------------------------------------------------------------
+@app.get("/qa", tags=["Question Answering"])
+async def question_answering(
+    question: str = Query(..., min_length=1, description="The question to ask EduGenie")
+):
+    """Answer a general knowledge / academic question using Gemini 1.5 Pro."""
+    try:
+        answer = answer_question(question)
+        return {"question": question, "answer": answer}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# /explain — Concept Explanation (POST)
+# ---------------------------------------------------------------------------
+@app.post("/explain", tags=["Concept Explanation"])
+async def concept_explanation(request: ExplainRequest):
+    """Generate a simplified, beginner-friendly explanation using LaMini-Flan-T5."""
+    topic = request.topic.strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="Field 'topic' cannot be empty.")
+
+    try:
+        explanation = explain_concept(topic)
+        return {"topic": topic, "explanation": explanation}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate explanation: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# /summarize — Summarization (POST)
+# ---------------------------------------------------------------------------
+@app.post("/summarize", tags=["Summarization"])
+async def summarization(request: SummarizeRequest):
+    """Summarize a long passage into a concise version using Gemini 1.5 Pro."""
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Field 'text' cannot be empty.")
+
+    try:
+        summary = summarize_text(text)
+        return {"original_length": len(text), "summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# /quiz — Quiz Generation (POST)
+# ---------------------------------------------------------------------------
+@app.post("/quiz", tags=["Quiz Generation"])
+async def quiz_generation(request: QuizRequest):
+    """Generate MCQ quiz questions from a passage using Gemini 1.5 Pro."""
+    passage = request.passage.strip()
+    if not passage:
+        raise HTTPException(status_code=400, detail="Field 'passage' cannot be empty.")
+
+    try:
+        quiz = generate_quiz(
+            passage,
+            num_questions=request.num_questions,
+            num_options=request.num_options,
+        )
+        # quiz_module returns {"error": "..."} on generation/parsing failure
+        if isinstance(quiz, dict) and "error" in quiz:
+            raise HTTPException(status_code=502, detail=quiz["error"])
+        return {"passage": passage, "quiz": quiz}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate quiz: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# /learn/recommendations — Personalized Learning Recommendations (GET)
+# ---------------------------------------------------------------------------
+@app.get("/learn/recommendations", tags=["Learning Recommendations"])
+async def learning_recommendations(
+    topic: str = Query(..., min_length=1, description="Topic to build a learning path for"),
+    level: str = Query("beginner", description="Learner's current level"),
+):
+    """Generate a personalized, structured learning path using Gemini 1.5 Pro."""
+    try:
+        recommendations = get_learning_recommendations(topic, level=level)
+        return {"topic": topic, "level": level, "recommendations": recommendations}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate learning path: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+@app.get("/health", tags=["Health"])
+async def health_check():
+    return {"status": "ok", "service": "EduGenie API"}
+
+
+# ---------------------------------------------------------------------------
+# Entry point (for `python main.py` instead of `uvicorn main:app`)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
